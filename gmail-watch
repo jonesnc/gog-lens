@@ -1,0 +1,99 @@
+#!/usr/bin/env -S mise exec -- ruby
+# frozen_string_literal: true
+
+# Alert the user's Mac about Gmail. Same pattern as ~/.local/bin/pr-alert-watch.py:
+# cron polls; each new message from someone else appends ONE spoken sentence
+# to ~/.claude/alerts.log (the Mac shows it and reads it aloud).
+#
+#   gmail-watch add <url|id> <name...> [--nag]   watch a thread
+#   gmail-watch add-query <name> -- <query> [--nag]
+#                                  watch a search, e.g. 'from:@vendor.com to:me'
+#   gmail-watch rm <name|thread-id>
+#   gmail-watch snooze <name> <minutes>          silence one watch for a while
+#   gmail-watch list
+#   gmail-watch summary                          morning line (cron 08:00)
+#   gmail-watch                                  poll (cron */5)
+#
+# --nag re-alerts every 15 min until you sent the last message (threads)
+# or until the message is read (queries). No nags in quiet hours 18:00-07:30.
+
+require_relative "gmail"
+include Gmail
+
+STATE = ENV.fetch("GMAIL_WATCH_STATE") { File.join(Dir.home, ".claude", "gmail-watch.json") }
+ALERTS = ENV.fetch("GMAIL_WATCH_ALERTS") { File.join(Dir.home, ".claude", "alerts.log") }
+NAG = 900
+
+state = File.exist?(STATE) ? JSON.parse(File.read(STATE)) : {}
+save = -> { File.write(STATE, JSON.pretty_generate(state)) }
+find = ->(key) { state.keys.find { _1 == thread_id(key) || state[_1]["name"] == key } }
+alert = ->(text) { File.write(ALERTS, "#{text}\n", mode: "a") }
+quiet = -> { t = Time.now.strftime("%H:%M"); t >= "18:00" || t < "07:30" }
+who = ->(m) { m.name || m.domain }
+msgs_for = ->(w, id) { w["query"] ? q("(#{w['query']}) newer_than:2d").fresh.to_a : thread(id) }
+
+case ARGV.shift
+when "add"
+  id = thread_id(ARGV.shift)
+  nag = ARGV.delete("--nag") && NAG
+  state[id] = { "name" => ARGV.join(" "), "seen" => thread(id).map(&:id), "nag" => nag }
+  save.call
+  puts "watching #{state[id]['name']}: #{state[id]['seen'].size} msgs so far"
+when "add-query"
+  name = ARGV.shift
+  nag = ARGV.delete("--nag") && NAG
+  ARGV.shift if ARGV.first == "--"
+  w = { "name" => name, "query" => ARGV.join(" "), "nag" => nag }
+  w["seen"] = msgs_for.(w, nil).map(&:id)
+  state["q:#{name}"] = w
+  save.call
+  puts "watching #{name}: #{w['query']} (#{w['seen'].size} recent msgs marked seen)"
+when "rm"
+  puts state.delete(find.(ARGV.join(" "))) ? "removed" : "no such watch"
+  save.call
+when "snooze"
+  key = find.(ARGV.first) or abort "no such watch"
+  state[key]["snooze_until"] = Time.now.to_i + ARGV[1].to_i * 60
+  save.call
+  puts "snoozed #{ARGV.first} until #{Time.at(state[key]['snooze_until']).strftime('%H:%M')}"
+when "list"
+  state.each do |id, w|
+    snz = w["snooze_until"].to_i > Time.now.to_i ? "  snoozed" : ""
+    where = w["query"] ? "query: #{w['query']}" : "https://mail.google.com/mail/u/0/#all/#{id}"
+    puts "#{w['name']}#{' (nag)' if w['nag']}#{snz}  #{where}"
+  end
+when "summary"
+  unread = q("in:inbox is:unread").fresh.thread_ids.size
+  waiting = state.filter_map do |id, w|
+    next if w["query"]
+
+    last = thread(id).max_by(&:date)
+    w["name"] if last && !last.mine?
+  end
+  alert.("Good morning. #{unread} unread inbox threads." +
+         (waiting.any? ? " Waiting on you: #{waiting.join(', ')}." : ""))
+when nil
+  state.each do |id, w|
+    msgs = msgs_for.(w, id)
+    new = msgs.reject { w["seen"].include?(_1.id) }
+    w["seen"] = (w["seen"] | new.map(&:id)).last(500)
+    theirs = new.reject(&:mine?)
+    next if w["snooze_until"].to_i > Time.now.to_i
+
+    label = w["query"] ? "Gmail #{w['name']}" : "Gmail thread #{w['name']}"
+    theirs.each { alert.("#{label}: email from #{who.(_1)} waiting for you.") }
+    w["alerted"] = Time.now.to_i if theirs.any?
+    # Nag until the user answers (thread) or reads it (query).
+    last = w["query"] ? msgs.select(&:unread?).reject(&:mine?).max_by(&:date) : msgs.max_by(&:date)
+    next unless w["nag"] && last && !last.mine? && theirs.empty? && !quiet.call
+    next if Time.now.to_i - w["alerted"].to_i < w["nag"]
+
+    alert.("#{label}: email from #{who.(last)} waiting for you.")
+    w["alerted"] = Time.now.to_i
+  rescue Gmail::Error => e
+    warn "#{Time.now.iso8601} #{w['name']}: #{e.message}"
+  end
+  save.call
+else
+  abort "usage: gmail-watch [add | add-query | rm | snooze | list | summary]"
+end

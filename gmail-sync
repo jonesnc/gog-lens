@@ -1,0 +1,63 @@
+#!/usr/bin/env -S mise exec -- ruby
+# frozen_string_literal: true
+
+# Keep index.sqlite3 current. First run: full scan (resumable, ~51 msg/s).
+# Later runs: Gmail history since the last run, one metadata get per change.
+#   gmail-sync           full scan if never finished, else incremental
+#   gmail-sync --full    restart the full scan from page 1
+
+require_relative "gmail"
+include Gmail
+
+idx("DELETE FROM meta WHERE k IN ('full_page','full_done')") if ARGV.include?("--full")
+
+full_scan = lambda do
+  job("sync-full") do
+    meta!("history", history_now) unless meta("history")
+    # No mailbox total in the API; the 5 inbox categories cover received mail.
+    est = %w[PERSONAL UPDATES PROMOTIONS SOCIAL FORUMS].sum do
+      gog("labels", "get", "CATEGORY_#{_1}").then { |j| (j["label"] || j)["messagesTotal"].to_i }
+    end
+    done = idx("SELECT COUNT(*) n FROM msgs").first["n"]
+    prog = Progress.new("sync-full (total ~estimate)", est, every: 10)
+    prog.step(done) if meta("full_page")
+    say("resuming at saved page") if meta("full_page")
+    search_pages("-in:trash -in:spam", page: meta("full_page").to_s, prog:) do |rows, page|
+      upsert(rows.map { Msg.from_h(_1) })
+      meta!("full_page", page)
+    end
+    meta!("full_done", Time.now.iso8601)
+    say("full scan done: #{idx('SELECT COUNT(*) n FROM msgs').first['n']} msgs indexed")
+  end
+end
+
+incremental = lambda do
+  res = gog("history", "--since", meta("history"), "--all")
+  ids = res["messages"].to_a.uniq
+  names, gone, rows = label_names, [], []
+  prog = Progress.new("sync", ids.size, every: 10)
+  ids.each do |id|
+    m = msg_from_payload(gog("get", id, "--format", "metadata",
+                             "--headers", "From,Subject")["message"], names)
+    (m.labels & %w[TRASH SPAM]).any? ? gone << id : rows << m
+  rescue Gmail::Error => e
+    raise unless e.message.include?("404")
+
+    gone << id
+  ensure
+    prog.step
+  end
+  upsert(rows)
+  gone.each { idx("DELETE FROM msgs WHERE id=?", _1) }
+  meta!("history", res["historyId"])
+  meta!("synced", Time.now.iso8601)
+  say("sync: #{rows.size} upserted, #{gone.size} removed") if ids.any?
+rescue Gmail::Error => e
+  raise unless e.message.include?("404") # history id too old: re-scan 2 days
+
+  say("history expired; re-scanning newer_than:2d")
+  meta!("history", history_now)
+  search_pages("newer_than:2d -in:trash -in:spam") { upsert(_1.map { |r| Msg.from_h(r) }) }
+end
+
+meta("full_done") ? incremental.call : full_scan.call

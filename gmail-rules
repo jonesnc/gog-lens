@@ -1,0 +1,57 @@
+#!/usr/bin/env -S mise exec -- ruby
+# frozen_string_literal: true
+
+# Make Gmail match rules.rb (filters + retention). See rules.rb header.
+#   gmail-rules plan | apply | apply --yes
+
+require_relative "gmail"
+include Gmail
+
+Retain = Data.define(:label, :days, :action) do
+  def query = %(label:"#{label}" older_than:#{days}d -in:trash#{' is:unread' if action == :read})
+  def where
+    "#{Gmail.has_label(label)} AND ts < #{Time.now.to_i - days * 86_400}" \
+      "#{" AND #{Gmail.has_label('UNREAD')}" if action == :read}"
+  end
+end
+
+spec = Struct.new(:filters, :retains) do
+  def filter(**kw) = filters << Gmail.rule(**kw)
+  def retain(label, older_than:, action:) = retains << Retain.new(label, older_than.to_i, action)
+  def local(file) = File.exist?(p = File.join(Gmail::ROOT, file)) && instance_eval(File.read(p), p)
+end.new([], [])
+spec.instance_eval(File.read(File.join(ROOT, "rules.rb")), "rules.rb")
+
+cmd, yes = ARGV[0], ARGV.include?("--yes")
+abort "usage: gmail-rules plan | apply [--yes]" unless %w[plan apply].include?(cmd)
+
+d = diff(spec.filters, filters)
+puts "filters: #{d[:keep].size} keep, #{d[:create].size} create, #{d[:delete].size} delete"
+d[:create].each { puts "  + #{_1}" }
+d[:delete].each { puts "  - #{_1}" }
+overlaps(spec.filters).each { |a, b| puts "  ! redundant: #{a}\n      covered by #{b}" }
+
+synced = meta("full_done") && (meta("synced") || meta("full_done"))
+abort "retention: index not ready (run ./gmail-sync)" unless synced
+puts "retention (index as of #{synced}):"
+plan = spec.retains.map { [_1, idx("SELECT COUNT(*) n FROM msgs WHERE #{_1.where}")[0]["n"]] }
+plan.each { |r, n| puts format("  %-6s %7d  %s older than %dd", r.action, n, r.label, r.days) }
+exit if cmd == "plan"
+
+say("apply: #{yes ? 'LIVE' : 'dry run (add --yes to make changes)'}")
+d[:create].each do |f|
+  raise Error, "gog cannot create negated_query filters: #{f}" if f.criteria[:negated_query]
+
+  args = flags(**f.criteria, add_label: f.add.map { ensure_label(_1) if yes; _1 },
+                             remove_label: f.remove)
+  yes ? gog("settings", "filters", "create", *args) : say("would create filter #{args.join(' ')}")
+end
+d[:delete].each { yes ? delete_filter!(_1.id) : say("would delete filter #{_1}") }
+plan.each do |r, n|
+  next if n.zero?
+
+  q = q(r.query).where { r.action != :read || _1.unread? }
+               .expect((n * 0.9).floor..((n * 1.1).ceil + 20))
+  change = r.action == :read ? { remove: "UNREAD" } : { add: "TRASH", remove: "INBOX" }
+  yes ? q.modify!(**change) : say("would #{r.action} ~#{n} msgs: #{r.query}")
+end

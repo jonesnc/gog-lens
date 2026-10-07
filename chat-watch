@@ -1,0 +1,50 @@
+#!/usr/bin/env -S mise exec -- ruby
+# frozen_string_literal: true
+
+# Alert + nag on a Google Chat space, same pattern as gmail-watch.
+# When the newest message is from someone else: alert, then re-alert every
+# 15 min (not 18:00-07:30) until I post in the space.
+#
+#   chat-watch add <space|url> <name...>   watch
+#   chat-watch rm <name|space>              stop watching
+#   chat-watch list                         show watches
+#   chat-watch                              poll (cron)
+
+require_relative "chat"
+
+STATE = File.join(Dir.home, ".claude", "chat-watch.json")
+ALERTS = File.join(Dir.home, ".claude", "alerts.log")
+NAG = 900
+
+state = File.exist?(STATE) ? JSON.parse(File.read(STATE)) : {}
+save = -> { File.write(STATE, JSON.pretty_generate(state)) }
+quiet = -> { t = Time.now.strftime("%H:%M"); t >= "18:00" || t < "07:30" }
+
+case ARGV.shift
+when "add"
+  space = "spaces/#{ARGV.shift.to_s[%r{(?:spaces/|room/|dm/)?([\w-]+)(?:\?.*)?\z}, 1]}"
+  last = Chat.messages(space, max: 1).first
+  state[space] = { "name" => ARGV.join(" "), "seen" => last&.id, "alerted" => 0 }
+  save.call
+  puts "watching #{state[space]['name']} (#{space})"
+when "rm"
+  key = ARGV.join(" ")
+  state.reject! { |s, w| s == key || w["name"] == key }
+  save.call
+when "list"
+  state.each { |s, w| puts "#{w['name']}  #{s}" }
+else
+  state.each do |space, w|
+    last = Chat.messages(space, max: 1).first or next
+    next w["alerted"] = 0 if last.mine?
+
+    fresh = last.id != w["seen"]
+    due = Time.now.to_i - w["alerted"].to_i >= NAG && !quiet.call
+    next unless fresh || due
+
+    verb = fresh ? "new message from" : "still waiting on you:"
+    File.write(ALERTS, "Chat #{w['name']}: #{verb} #{last.sender}.\n", mode: "a")
+    w.merge!("seen" => last.id, "alerted" => Time.now.to_i)
+  end
+  save.call
+end
