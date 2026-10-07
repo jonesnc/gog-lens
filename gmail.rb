@@ -239,6 +239,7 @@ module Gmail
   #   thread("1a11...").map(&:sender)  # one call for the whole thread
   def thread(id)
     gog("thread", "get", id).dig("thread", "messages").to_a.map { msg_from_payload(_1) }
+                              .tap { index_msgs(_1) }
   end
 
   #   thread_id("https://mail.google.com/mail/u/0/#inbox/1a11...")  # => "1a11..."
@@ -392,6 +393,7 @@ module Gmail
       SQLite3::Database.new(DB, results_as_hash: true).tap do |db|
         db.execute_batch(<<~SQL)
           PRAGMA journal_mode=WAL;
+          PRAGMA busy_timeout=10000;
           CREATE TABLE IF NOT EXISTS msgs(id TEXT PRIMARY KEY, thread_id TEXT,
             sender TEXT, from_raw TEXT, subject TEXT, ts INTEGER, labels TEXT);
           CREATE INDEX IF NOT EXISTS msgs_sender ON msgs(sender);
@@ -416,16 +418,31 @@ module Gmail
     end
   end
 
+  GONE = %w[TRASH SPAM].freeze
+
   # Keep the index current as a side effect of live reads and writes, so the
   # next gmail-sync has less to do. No-op until the index file exists.
-  def index_rows(rows)
-    File.exist?(DB) && upsert(rows.map { Msg.from_h(_1) })
+  # The index holds live mail only, like gmail-sync: TRASH/SPAM rows are removed.
+  #   index_msgs(thread(id))  # also called by Query#fetch with every row page
+  def index_msgs(msgs)
+    return unless File.exist?(DB)
+
+    gone, live = msgs.partition { (_1.labels & GONE).any? }
+    upsert(live)
+    unindex(gone.map(&:id))
+  end
+
+  def index_rows(rows) = index_msgs(rows.map { Msg.from_h(_1) })
+
+  def unindex(ids)
+    idx.transaction { ids.each { |id| idx("DELETE FROM msgs WHERE id=?", id) } } if ids.any?
   end
 
   def index_labels(ids, add: nil, remove: nil)
     return unless File.exist?(DB)
 
     plus, minus = Array(add), Array(remove)
+    return unindex(ids) if (plus & GONE).any?
     idx.transaction do
       ids.each do |id|
         row = idx("SELECT labels FROM msgs WHERE id=?", id).first or next
