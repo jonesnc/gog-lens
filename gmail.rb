@@ -202,13 +202,16 @@ module Gmail
 
     def where(&blk) = Query.new(@query, @filters + [blk], @expected)
     def expect(n) = Query.new(@query, @filters, n) # Integer or Range
-    def fresh = tap { FileUtils.rm_f(cache_path) && (@to_a = nil) }
+    def fresh = tap { FileUtils.rm_f(cache_path) && (@to_a = @ids = nil) }
     def inspect = "#<Query #{@query.inspect} where=#{@filters.size} expect=#{@expected.inspect}>"
 
     def to_a = @to_a ||= fetch.select { |m| @filters.all? { _1.call(m) } }
     def each(&) = to_a.each(&)
     def size = to_a.size
-    def ids = to_a.map(&:id)
+
+    # Fast path with no .where filters: id-only list pages, no per-message gets.
+    def ids = @to_a || @filters.any? ? to_a.map(&:id) : (@ids ||= Gmail.list_ids(@query))
+    def count = ids.size
     def thread_ids = to_a.map(&:thread_id).uniq
 
     # Both units, always: Gmail's UI counts threads, the API counts messages.
@@ -238,18 +241,18 @@ module Gmail
     # dry_run: true prints what would change and touches nothing.
     def modify!(add: nil, remove: nil, dry_run: false)
       raise Error, "set .expect(n) before writing" unless @expected
-      unless @expected === size
-        raise Error, "count #{size} != expected #{@expected}; nothing changed"
+      unless @expected === count
+        raise Error, "count #{count} != expected #{@expected}; nothing changed"
       end
 
       args = Gmail.flags(add:, remove:)
       if dry_run
-        Gmail.say("dry-run: would modify #{size} msgs #{args.join(' ')} (#{@query})")
-        return size
+        Gmail.say("dry-run: would modify #{count} msgs #{args.join(' ')} (#{@query})")
+        return count
       end
 
       jobs = Queue.new.tap { |jq| ids.each_slice(1000) { jq << _1 } }.tap(&:close)
-      prog, lock = Progress.new("modify", size), Mutex.new
+      prog, lock = Progress.new("modify", count), Mutex.new
       Array.new(4) do
         Thread.new do
           while (batch = jobs.pop)
@@ -260,7 +263,7 @@ module Gmail
       end.each(&:join)
       prog.finish
       FileUtils.rm_f(cache_path)
-      size
+      count
     end
 
     private
@@ -278,6 +281,20 @@ module Gmail
       File.write(cache_path, JSON.generate(rows))
       rows.map { Msg.from_h(_1) }
     end
+  end
+
+  # Message ids only: users.messages.list, 500 per call, ~100x cheaper in
+  # quota than `messages search` (which gets each message).
+  def list_ids(query)
+    ids, page = [], nil
+    loop do
+      params = { userId: "me", q: query, maxResults: 500, fields: "messages/id,nextPageToken" }
+      params[:pageToken] = page if page
+      res = gog("call", "gmail", "v1", "users.messages.list", "--params", params.to_json, cmd: "api")
+      ids.concat(res["messages"].to_a.map { _1["id"] })
+      page = res["nextPageToken"] or break
+    end
+    ids
   end
 
   # Yield each 500-row page of `messages search` (metadata rows, no bodies).
