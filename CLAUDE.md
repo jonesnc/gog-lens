@@ -75,7 +75,13 @@ does not exist. Google Chat is for Workspace only: no `chat.rb` for @gmail.com.
 - So: read from the index; use `labels` for counts; 1000-ID batch writes.
 - `q(...).count`, `.ids` and writes without `.where` use id-only list pages
   (500 ids per call, ~0.3 s). Rows (`to_a`, `top`, `summary`) cost one get each.
-- Going over quota starts a cooldown: retries wait 2-32 s, then raise.
+- Every `gog()` call takes its quota units from a shared per-account bucket
+  (`~/.cache/gog-lens/bucket-<account>`, flock), so all processes together stay
+  under the per-user limit. Default 1400 units/min (measured limit ~1500 on a
+  new project); set `GOG_LENS_UNITS_PER_MIN` after a quota increase.
+- Going over quota anyway starts a cooldown: retries wait 2-32 s, then raise.
+- Live reads upsert rows into the index, and writes update its labels, once
+  the index file exists.
 - Full index scan of ~250k msgs ≈ 1.5 h (one time). Incremental sync costs
   one `history` call plus one metadata `get` per changed message.
 - To profile: `mise exec -- vernier run -- ./gmr '...'`, then `vernier view`.

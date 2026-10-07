@@ -38,6 +38,7 @@ module Gmail
   #   gog("labels", "get", "INBOX")  # => Hash
   #   gog("call", "gmail", "v1", "users.messages.list", "--params", {...}.to_json, cmd: "api")
   def gog(*args, json: true, cmd: "gmail")
+    take(cost(cmd, args))
     cmd = ["gog", cmd, "--account", ACCOUNT, "--no-input",
            *("--json" if json), *args.compact.map(&:to_s)]
     wait = 2
@@ -53,6 +54,47 @@ module Gmail
       sleep wait
       wait *= 2
       retry
+    end
+  end
+
+  # Shared per-account token bucket: every gog-lens process (gmr, sync, watch)
+  # takes quota units here under flock, so together they stay under Google's
+  # per-user limit and never trigger the 403 cooldown. Measured 2026-10-07 on a
+  # new project: ~1500 units/min/user. Raise UNITS_PER_MIN if the quota is raised.
+  UNITS_PER_MIN = Integer(ENV.fetch("GOG_LENS_UNITS_PER_MIN", 1400))
+  BURST = 300 # units; one 50-row search page (255) must fit
+  BUCKET = File.join(Dir.home, ".cache", "gog-lens", "bucket-#{ACCOUNT}")
+
+  #   take(5)  # blocks until 5 units are free; called by gog()
+  def take(units)
+    FileUtils.mkdir_p(File.dirname(BUCKET))
+    wait = File.open(BUCKET, File::RDWR | File::CREAT) do |f|
+      f.flock(File::LOCK_EX)
+      level, at = f.read.split.map(&:to_f)
+      now = Time.now.to_f
+      level = [(level || BURST) + (now - (at || now)) * UNITS_PER_MIN / 60.0, BURST].min
+      f.rewind
+      f.truncate(0)
+      f.write("#{level - units} #{now}") # negative = reserved; later callers wait longer
+      level >= units ? 0 : (units - level) * 60.0 / UNITS_PER_MIN
+    end
+    sleep wait if wait.positive?
+  end
+
+  # Gmail quota units for one gog call (developers.google.com/gmail/api/reference/quota).
+  #   cost("gmail", ["messages", "search", "--max", 50]) # => 255
+  def cost(cmd, args)
+    a = args.map(&:to_s)
+    return 5 if cmd == "api"
+    case a.first(2)
+    in ["messages", "search"] then 5 + 5 * a[a.index("--max") + 1].to_i
+    in ["batch", "modify"] then 50
+    in ["thread", "get"] then 10
+    in ["labels", *] | ["settings", *] then 1
+    in ["history", *] then 2
+    in ["send", *] then 100
+    in ["drafts", *] then 10
+    else 5
     end
   end
 
@@ -279,6 +321,7 @@ module Gmail
         end
       end.each(&:join)
       prog.finish
+      Gmail.index_labels(ids, add:, remove:)
       FileUtils.rm_f(cache_path)
       count
     end
@@ -295,6 +338,7 @@ module Gmail
       rows = []
       Gmail.search_pages(@query) { rows.concat(_1) }
       Gmail.prune_cache
+      Gmail.index_rows(rows)
       File.write(cache_path, JSON.generate(rows))
       rows.map { Msg.from_h(_1) }
     end
@@ -316,10 +360,12 @@ module Gmail
   end
 
   #   search_pages("from:x.com") { |rows, _page| ... }  # metadata rows, ~45 msg/s
-  def search_pages(query, page: "", prog: nil)
+  # gog gets a page's rows in one burst; 50-row pages keep each burst inside
+  # the bucket (a 500-row burst that fails refetches the whole page).
+  def search_pages(query, page: "", prog: nil, per: 50)
     prog ||= Progress.new("search")
     loop do
-      res = gog("messages", "search", "--max", 500,
+      res = gog("messages", "search", "--max", per,
                 *(["--page", page] unless page.empty?), "--", query)
       rows = res["messages"].to_a
       page = res["nextPageToken"].to_s
@@ -327,7 +373,7 @@ module Gmail
       prog.step(rows.size)
       break if page.empty?
     end
-    prog.finish if prog.done > 500
+    prog.finish if prog.done > 1000
   end
 
   # Drop cached searches older than a day.
@@ -366,6 +412,25 @@ module Gmail
         ts = Time.parse(m.date).to_i rescue 0
         idx("INSERT OR REPLACE INTO msgs VALUES(?,?,?,?,?,?,?)", m.id, m.thread_id,
             m.sender, m.from, m.subject, ts, "|#{m.labels.join('|')}|")
+      end
+    end
+  end
+
+  # Keep the index current as a side effect of live reads and writes, so the
+  # next gmail-sync has less to do. No-op until the index file exists.
+  def index_rows(rows)
+    File.exist?(DB) && upsert(rows.map { Msg.from_h(_1) })
+  end
+
+  def index_labels(ids, add: nil, remove: nil)
+    return unless File.exist?(DB)
+
+    plus, minus = Array(add), Array(remove)
+    idx.transaction do
+      ids.each do |id|
+        row = idx("SELECT labels FROM msgs WHERE id=?", id).first or next
+        labels = (row["labels"].split("|").reject(&:empty?) - minus + plus).uniq
+        idx("UPDATE msgs SET labels=? WHERE id=?", "|#{labels.join("|")}|", id)
       end
     end
   end

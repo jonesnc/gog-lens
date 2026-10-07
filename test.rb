@@ -72,4 +72,10 @@ class GmailTest < Minitest::Test
   ensure
     Gmail.define_singleton_method(:list_ids, real)
   end
+
+  def test_cost
+    assert_equal 255, Gmail.cost("gmail", ["messages", "search", "--max", 50, "--", "x"])
+    assert_equal 50, Gmail.cost("gmail", %w[batch modify a b])
+    assert_equal 5, Gmail.cost("api", %w[call gmail v1 users.messages.list])
+  end
 end
