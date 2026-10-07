@@ -2,7 +2,8 @@
 # frozen_string_literal: true
 
 # Keep index.sqlite3 current. First run: full scan (resumable, ~51 msg/s).
-# Later runs: Gmail history since the last run, one metadata get per change.
+# Later runs: raw Gmail history since the last run. Label changes, trash and
+# deletes apply from the history records; only unseen mail needs a get.
 #   gmail-sync           full scan if never finished, else incremental
 #   gmail-sync --full    restart the full scan from page 1
 
@@ -32,14 +33,44 @@ full_scan = lambda do
 end
 
 incremental = lambda do
-  res = gog("history", "--since", meta("history"), "--all")
-  ids = res["messages"].to_a.uniq
-  names, gone, rows = label_names, [], []
-  prog = Progress.new("sync", ids.size, every: 10)
-  ids.each do |id|
-    m = msg_from_payload(gog("get", id, "--format", "metadata",
-                             "--headers", "From,Subject")["message"], names)
-    (m.labels & %w[TRASH SPAM]).any? ? gone << id : rows << m
+  # Raw API: `gog gmail history` returns messagesAdded only (label changes,
+  # trash and deletes are dropped).
+  recs, page, now = [], nil, nil
+  loop do
+    params = { userId: "me", startHistoryId: meta("history"), maxResults: 500, pageToken: page }.compact
+    res = gog("call", "gmail", "v1", "users.history.list", "--params", params.to_json, cmd: "api")
+    recs.concat(res["history"].to_a)
+    now = res["historyId"]
+    page = res["nextPageToken"] or break
+  end
+
+  # Label changes carry the message's full label set: apply it without a get.
+  names, gone, relabel, added = label_names, [], {}, []
+  recs.each do |h|
+    h["messagesDeleted"].to_a.each { gone << _1.dig("message", "id") }
+    h["messagesAdded"].to_a.each { added << _1.dig("message", "id") }
+    (h["labelsAdded"].to_a + h["labelsRemoved"].to_a).each do |c|
+      relabel[c.dig("message", "id")] = c.dig("message", "labelIds").to_a.map { names.fetch(_1, _1) }
+    end
+  end
+  indexed = ->(id) { idx("SELECT 1 FROM msgs WHERE id=?", id).any? }
+  known = relabel.keys.select(&indexed)
+  idx.transaction do
+    known.each do |id|
+      next gone << id if (relabel[id] & GONE).any?
+
+      idx("UPDATE msgs SET labels=? WHERE id=?", "|#{relabel[id].join('|')}|", id)
+    end
+  end
+
+  # Only mail the index has never seen needs a metadata get.
+  fetch = (added + relabel.keys).uniq - known - gone
+  fetch.reject! { |id| (relabel[id].to_a & GONE).any? || indexed.(id) } # trashed or seen: no get
+  rows = []
+  prog = Progress.new("sync", fetch.size, every: 10)
+  fetch.each do |id|
+    m = msg_from_payload(gog("get", id, "--format", "metadata", "--headers", "From,Subject")["message"], names)
+    (m.labels & GONE).any? ? gone << id : rows << m
   rescue Gmail::Error => e
     raise unless e.message.include?("404")
 
@@ -48,10 +79,10 @@ incremental = lambda do
     prog.step
   end
   upsert(rows)
-  gone.each { idx("DELETE FROM msgs WHERE id=?", _1) }
-  meta!("history", res["historyId"])
+  unindex(gone.uniq)
+  meta!("history", now)
   meta!("synced", Time.now.iso8601)
-  say("sync: #{rows.size} upserted, #{gone.size} removed") if ids.any?
+  say("sync: #{recs.size} history records, #{known.size} relabeled, #{rows.size} fetched, #{gone.uniq.size} removed") if recs.any?
 rescue Gmail::Error => e
   raise unless e.message.include?("404") # history id too old: re-scan 2 days
 
