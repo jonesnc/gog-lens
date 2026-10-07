@@ -73,6 +73,9 @@ does not exist. Google Chat is for Workspace only: no `chat.rb` for @gmail.com.
 - The Gmail per-user quota is the limit: bursts of ~95 msg/s, then 429s;
   ~40-50 msg/s sustained. Parallel API reads only cause more 429s.
 - So: read from the index; use `labels` for counts; 1000-ID batch writes.
+- `q(...).count`, `.ids` and writes without `.where` use id-only list pages
+  (500 ids per call, ~0.3 s). Rows (`to_a`, `top`, `summary`) cost one get each.
+- Going over quota starts a cooldown: retries wait 2-32 s, then raise.
 - Full index scan of ~250k msgs ≈ 1.5 h (one time). Incremental sync costs
   one `history` call plus one metadata `get` per changed message.
 - To profile: `mise exec -- vernier run -- ./gmr '...'`, then `vernier view`.

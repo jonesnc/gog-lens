@@ -4,8 +4,8 @@
 # Gmail lens over gog: primitives + helpers only; tasks are one-off scripts.
 #   ./gmr 'q("in:inbox is:unread").top'          (gmr -> gmail.rb)
 #   require_relative "gmail"; include Gmail      (from another script)
-# Perf (measured): wall time = Gmail API quota (~51 msg/s); Ruby is noise.
-# So: read from the local index (idx), cache searches, batch writes.
+# Perf: wall time = Gmail quota (~45 msg/s for rows; ids are ~1000x cheaper).
+# Cheapest first: labels / q.count / ix (index) -> q(narrow).top -> q(wide).to_a.
 
 require "digest"
 require "fileutils"
@@ -34,21 +34,24 @@ module Gmail
 
   # --- transport -------------------------------------------------------------
 
-  # Run `gog gmail ARGS`, parse JSON, back off on quota errors.
+  # Raw escape hatch; prefer q/ix. Backs off 2,4,8,16,32 s on quota errors.
+  #   gog("labels", "get", "INBOX")  # => Hash
+  #   gog("call", "gmail", "v1", "users.messages.list", "--params", {...}.to_json, cmd: "api")
   def gog(*args, json: true, cmd: "gmail")
     cmd = ["gog", cmd, "--account", ACCOUNT, "--no-input",
            *("--json" if json), *args.compact.map(&:to_s)]
-    tries = 6
+    wait = 2
     begin
       out, err, st = Open3.capture3(*cmd)
       raise Error, "gog #{args.first(2).join(' ')}: #{err.strip}" unless st.success?
 
       json ? JSON.parse(out) : out
     rescue Error => e
-      raise unless e.message.match?(/rateLimitExceeded|429/) && (tries -= 1).positive?
+      raise unless e.message.match?(/rateLimitExceeded|429/) && wait <= 32
 
-      warn "rate limited; waiting 30s"
-      sleep 30
+      warn "rate limited; waiting #{wait}s"
+      sleep wait
+      wait *= 2
       retry
     end
   end
@@ -66,6 +69,7 @@ module Gmail
 
   # --- jobs + progress -------------------------------------------------------
 
+  #   prog = Progress.new("trash", ids.size); ids.each_slice(1000) { ...; prog.step(_1.size) }; prog.finish
   # Lines like "modify: 3000/8328 (36%) eta 42s 51/s". Newline-separated so
   # `tail -f` works; throttled to one line per `every` seconds.
   class Progress
@@ -98,14 +102,15 @@ module Gmail
     end
   end
 
-  # Timestamped line to stderr and to the current job log (if any).
+  #   say("trashed 582")  # "14:40:01 trashed 582" to stderr + job log
   def say(msg)
     line = "#{Time.now.strftime('%H:%M:%S')} #{msg}"
     warn line
     @@log&.then { _1.puts(line) || _1.flush }
   end
 
-  # job("sync") { ... }: log to logs/sync-<stamp>.log; prints the tail -f hint.
+  #   job("cleanup") { q("...").expect(n).trash! }  # long work: background it
+  # Logs to logs/sync-<stamp>.log; prints the tail -f hint.
   def job(name)
     FileUtils.mkdir_p(LOGS)
     path = File.join(LOGS, "#{name}-#{Time.now.strftime('%Y%m%d-%H%M%S')}.log")
@@ -122,6 +127,7 @@ module Gmail
   ROLE = /\A(no-?reply|do-?not-?reply|notifications?|alerts?|news(letter)?|info|
            marketing|updates?|support|mailer(-daemon)?|bounce|digest|team|hello)\b/x
 
+  #   mask("jane.doe@gmail.com")  # => "ja***@gmail.com"
   # Role boxes in full; people as "ab***@domain" (own domain: 1 char).
   def mask(addr)
     local, domain = addr.to_s.split("@", 2)
@@ -131,6 +137,7 @@ module Gmail
     "#{local[0, domain.end_with?(ORG) ? 1 : 2]}***@#{domain}"
   end
 
+  #   redact(subjects)  # only for output that gets shared
   # Keep words that repeat across >= min_share of subjects (template text);
   # mask the rest. IDs, emails and T-numbers are always masked.
   def redact(subjects, min_share: 0.3)
@@ -162,18 +169,21 @@ module Gmail
     def day = date[0, 10]
     def url = "https://mail.google.com/mail/u/0/#all/#{thread_id}"
 
-    # Header values only: m.headers("To", "Cc")
+    # 1 get per call; avoid in loops over many msgs.  m.headers("To", "Cc")
     def headers(*names)
       Gmail.gog("get", id, "--format", "metadata", "--headers", names.join(","))
            .dig("message", "payload", "headers").to_a.to_h { [_1["name"], _1["value"]] }
     end
 
-    # Full message, including body.
+    # 1 full get; only when the body is needed.  m.body!.dig("message", "snippet")
     def body!
       Gmail.gog("get", id, "--format", "full")
     end
   end
 
+  # Live search; nothing is fetched until used.
+  #   q("in:inbox newer_than:14d").top(:sender, 20)  # fetches rows (~45 msg/s)
+  #   q("from:x.com").count                          # ids only: ~0.3 s per 500
   def q(query) = Query.new(query)
 
   # Msg from a `get --format metadata` / thread message payload.
@@ -184,15 +194,17 @@ module Gmail
             m["labelIds"].to_a.map { names.fetch(_1, _1) })
   end
 
-  # Thread's messages as Msg (gog returns bodies too; dropped here).
+  #   thread("1a11...").map(&:sender)  # one call for the whole thread
   def thread(id)
     gog("thread", "get", id).dig("thread", "messages").to_a.map { msg_from_payload(_1) }
   end
 
-  # Thread id from a Gmail URL, a message id, or a thread id.
+  #   thread_id("https://mail.google.com/mail/u/0/#inbox/1a11...")  # => "1a11..."
   def thread_id(ref) = ref.to_s[%r{[#/]([0-9a-f]{16})\z}, 1] || ref.to_s
 
-  # Lazy, cached search. Enumerable of Msg; writes need .expect(n).
+  # Lazy search, rows cached 10 min. Cost: count/ids/writes = id pages only
+  # (fast); to_a/each/top/summary/where = one metadata get per msg (slow).
+  # Narrow the Gmail query first; use .where only for what Gmail cannot do.
   class Query
     include Enumerable
 
@@ -200,7 +212,9 @@ module Gmail
       @query, @filters, @expected = query, filters, expected
     end
 
+    #   q("from:shop.com").where { _1.subject !~ /receipt/i }  # forces row fetch
     def where(&blk) = Query.new(@query, @filters + [blk], @expected)
+    #   q("from:x.com").expect(582).trash!  # write runs only if count == 582
     def expect(n) = Query.new(@query, @filters, n) # Integer or Range
     def fresh = tap { FileUtils.rm_f(cache_path) && (@to_a = @ids = nil) }
     def inspect = "#<Query #{@query.inspect} where=#{@filters.size} expect=#{@expected.inspect}>"
@@ -209,23 +223,25 @@ module Gmail
     def each(&) = to_a.each(&)
     def size = to_a.size
 
-    # Fast path with no .where filters: id-only list pages, no per-message gets.
+    #   q("from:x.com").count  # => 582 in ~1 s; no per-message gets without .where
     def ids = @to_a || @filters.any? ? to_a.map(&:id) : (@ids ||= Gmail.list_ids(@query))
-    def count = ids.size
+    def count(&) = block_given? ? to_a.count(&) : ids.size
     def thread_ids = to_a.map(&:thread_id).uniq
 
+    #   q("in:inbox").summary  # => "94 threads / 106 msgs, 93 unread, 2026-09-23..2026-10-07"
     # Both units, always: Gmail's UI counts threads, the API counts messages.
     def summary
       "#{thread_ids.size} threads / #{size} msgs, #{count(&:unread?)} unread, " \
         "#{to_a.map(&:day).minmax.join('..')}"
     end
 
-    # [[key, count], ...] biggest first; senders come back masked.
+    #   q("in:inbox newer_than:14d").top(:sender, 20)  # => [["a@x.com", 22], ...] (masked)
     def top(key = :sender, n = 15)
       to_a.group_by(&key).transform_values(&:size).max_by(n) { _2 }
           .map { |k, c| [key == :sender ? Gmail.mask(k) : k, c] }
     end
 
+    #   q("from:x.com subject:appeal").expect(40).trash!  # also: archive!(read: true) read! label!("X")
     def trash! = modify!(add: "TRASH", remove: "INBOX")
     def archive!(read: false) = modify!(remove: ["INBOX", *("UNREAD" if read)])
     def read! = modify!(remove: "UNREAD")
@@ -237,6 +253,7 @@ module Gmail
       modify!(add: Gmail.ensure_label(name), remove: ("INBOX" if archive))
     end
 
+    #   q("...").expect(n).modify!(add: "X", remove: "INBOX", dry_run: true)  # check first
     # Guarded batch modify: 1000 ids/call, 4 threads, progress lines.
     # dry_run: true prints what would change and touches nothing.
     def modify!(add: nil, remove: nil, dry_run: false)
@@ -283,6 +300,7 @@ module Gmail
     end
   end
 
+  #   list_ids("from:x.com")  # => ["1a11...", ...]
   # Message ids only: users.messages.list, 500 per call, ~100x cheaper in
   # quota than `messages search` (which gets each message).
   def list_ids(query)
@@ -297,7 +315,7 @@ module Gmail
     ids
   end
 
-  # Yield each 500-row page of `messages search` (metadata rows, no bodies).
+  #   search_pages("from:x.com") { |rows, _page| ... }  # metadata rows, ~45 msg/s
   def search_pages(query, page: "", prog: nil)
     prog ||= Progress.new("search")
     loop do
@@ -320,7 +338,8 @@ module Gmail
 
   # --- local index (SQLite; `./gmail-sync` keeps it current) -----------------
 
-  # idx("SELECT ...", args) => rows as hashes. Labels column is "|A|B|".
+  # Needs ./gmail-sync first. Milliseconds, no quota. Labels column is "|A|B|".
+  #   idx("SELECT sender, COUNT(*) n FROM msgs GROUP BY 1 ORDER BY n DESC LIMIT 20")
   def idx(sql = nil, *args)
     @db ||= begin
       require "sqlite3"
@@ -354,7 +373,7 @@ module Gmail
   # SQL fragment for "has label NAME" against the |A|B| column.
   def has_label(name) = "labels LIKE '%|#{name.gsub("'", "''")}|%'"
 
-  # Indexed messages as Msg: ix("sender LIKE '%@vendor.com'", limit: 50)
+  #   ix("sender LIKE ?", "%@vendor.com", limit: 50)  # => [Msg], newest first
   def ix(where = "1", *args, limit: nil)
     sql = "SELECT * FROM msgs WHERE #{where} ORDER BY ts DESC#{" LIMIT #{limit.to_i}" if limit}"
     idx(sql, *args).map do |r|
@@ -383,7 +402,7 @@ module Gmail
 
   def delete_label!(name) = gog("labels", "delete", name, "--force")
 
-  # {name => [total, unread]} via labels.get: cheap, no search.
+  #   labels["INBOX"]  # => [10040, 93] (msgs total, unread); 1 call per label, no search
   def labels(user_only: true)
     label_list.select { !user_only || _1["type"] == "user" || _1["id"] == "INBOX" }.to_h do |l|
       j = gog("labels", "get", l["id"]).then { _1["label"] || _1 }
@@ -400,6 +419,7 @@ module Gmail
     def to_s = "#{criteria.map { "#{_1}=#{_2}" }.join(' ')} +#{add.join(',')} -#{remove.join(',')}"
   end
 
+  #   filters.map(&:to_s)  # live Gmail filters as Filter
   def filters
     names = label_names
     snake = ->(k) { k.gsub(/([A-Z])/) { "_#{_1.downcase}" }.to_sym }
@@ -411,6 +431,7 @@ module Gmail
     end
   end
 
+  #   filter!(from: "x.com", label: "Shop", skip_inbox: true)  # prefer rules.rb + gmail-rules
   # filter!(from: "x@y.com", label: "Dev/X", archive: true, mark_read: true)
   def filter!(label: nil, **kw)
     gog("settings", "filters", "create", *flags(add_label: label && ensure_label(label), **kw))
@@ -471,6 +492,7 @@ module Gmail
 
   # --- compose (outward-facing: confirm with the user before send!) -------
 
+  #   draft!(to: "a@b.com", subject: "Hi", body: "...")  # send! only after the user approves
   def draft!(**kw) = gog("drafts", "create", *flags(**kw))
   def send!(**kw) = gog("send", *flags(**kw))
 end

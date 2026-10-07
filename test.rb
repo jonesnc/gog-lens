@@ -67,6 +67,7 @@ class GmailTest < Minitest::Test
     Gmail.define_singleton_method(:list_ids) { |_q| %w[a b c] }
     q = Gmail::Query.new("from:x")
     assert_equal 3, q.count
+    assert_equal 1, Gmail::Query.new("x").tap { _1.instance_variable_set(:@to_a, [Gmail::Msg.new("a", "t", "f", "s", "2026-01-01", ["UNREAD"])]) }.count(&:unread?)
     assert_equal 3, q.expect(3).modify!(add: "TRASH", dry_run: true)
   ensure
     Gmail.define_singleton_method(:list_ids, real)
