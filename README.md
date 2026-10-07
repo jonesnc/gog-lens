@@ -1,6 +1,6 @@
 # gog-lens
 
-A small Ruby 4 lens over [gogcli](https://github.com/steipete/gogcli) for
+A small Ruby 4 lens over [gogcli](https://github.com/openclaw/gogcli) for
 Gmail and Google Chat. Composable primitives instead of big workflows, a
 local SQLite index so questions are instant and cost no API quota, Gmail
 filters and retention kept as code, and cron watchers that tell you when
@@ -23,7 +23,7 @@ someone replies.
 ## Requirements
 
 - Ruby 4 (e.g. `mise use -g ruby@4`; YJIT recommended: `RUBY_YJIT_ENABLE=1`)
-- [gogcli](https://github.com/steipete/gogcli) authorized with the `gmail`
+- [gogcli](https://github.com/openclaw/gogcli) authorized with the `gmail`
   scope (and `chat` for Google Chat; enable the Chat API in your Cloud project)
 - `gem install sqlite3`
 
