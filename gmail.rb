@@ -14,12 +14,18 @@ require "open3"
 require "time"
 
 module Gmail
-  ACCOUNT = ENV.fetch("GOG_ACCOUNT") { abort "set GOG_ACCOUNT=<your gmail address>" }
+  # GOG_ACCOUNT, else the only account in `gog auth list`.
+  ACCOUNT = ENV.fetch("GOG_ACCOUNT") do
+    accounts = Open3.capture2("gog", "auth", "list").first.lines.map { _1.split("\t").first }.uniq
+    accounts.one? ? accounts.first : abort("set GOG_ACCOUNT=<your gmail address> (gog has #{accounts.size} accounts)")
+  end
   ORG = ACCOUNT.split("@").last # own domain: masked harder
   ROOT = __dir__
   LOGS = File.join(ROOT, "logs")
   CACHE = File.join(LOGS, "cache")
-  DB = File.join(ROOT, "index.sqlite3")
+  # One index per account; a legacy index.sqlite3 is kept for single-account use.
+  DB = [File.join(ROOT, "index-#{ACCOUNT}.sqlite3"), File.join(ROOT, "index.sqlite3")]
+       .then { |own, old| !File.exist?(own) && File.exist?(old) ? old : own }
   TTL = 600 # seconds a search result is reused
   Error = Class.new(RuntimeError)
   @@log = nil # current job log (shared by Gmail.say and included `say`)
@@ -259,7 +265,7 @@ module Gmail
 
     private
 
-    def cache_path = File.join(CACHE, "#{Digest::SHA1.hexdigest(@query)}.json")
+    def cache_path = File.join(CACHE, "#{Digest::SHA1.hexdigest("#{ACCOUNT}\n#{@query}")}.json")
 
     def fetch
       if File.exist?(cache_path) && Time.now - File.mtime(cache_path) < TTL

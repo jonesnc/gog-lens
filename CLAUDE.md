@@ -8,8 +8,8 @@ need it. Never add task-specific features.
 | File | Job |
 |---|---|
 | `gmail.rb` (`gmr`) | library + `gmr` runner |
-| `gmail-sync` | keeps `index.sqlite3` current (full scan once, then history) |
-| `rules.rb` | filters + retention as code; loads gitignored `rules.local.rb` |
+| `gmail-sync` | keeps `index-<account>.sqlite3` current (full scan once, then history) |
+| `rules.rb` | filters + retention as code; loads gitignored `rules.local.<account>.rb` |
 | `gmail-rules` | `plan` / `apply` (dry run) / `apply --yes` against `rules.rb` |
 | `gmail-watch` | thread/query watches → `~/.claude/alerts.log` (Mac speaks it) |
 | `test.rb` | offline tests, fake data: `./test.rb` |
@@ -43,8 +43,15 @@ mask(addr)  redact(subjects)
 
 ## Setup
 
-Env only, no defaults: `GOG_ACCOUNT` (gmail address) for everything,
+Env: `GOG_ACCOUNT` (gmail address) for everything; with one gog account it
+defaults to that account,
 `CHAT_ME` (your Chat display name) for `chat.rb`. Scripts abort if unset.
+
+More than one account: each one has its own index (`index-<account>.sqlite3`),
+rules (`rules.local.<account>.rb`) and watch state
+(`~/.claude/gmail-watch-<account>.json`). The legacy names `index.sqlite3`,
+`rules.local.rb` and `gmail-watch.json` are used when the per-account file
+does not exist. Google Chat is for Workspace only: no `chat.rb` for @gmail.com.
 
 ## Rules
 
@@ -80,7 +87,7 @@ Env only, no defaults: `GOG_ACCOUNT` (gmail address) for everything,
 Poll (no args) appends `Gmail thread <name>: email from <sender name>
 waiting for you.` to `~/.claude/alerts.log`. `--nag` repeats every 15 min
 until you reply (thread) or reads it (query); no nags 18:00-07:30.
-State: `~/.claude/gmail-watch.json`. Errors: `~/.claude/gmail-watch.err`.
+State: `~/.claude/gmail-watch-<account>.json`. Errors: `~/.claude/gmail-watch.err`.
 Test without alerting the Mac: set `GMAIL_WATCH_STATE` and
 `GMAIL_WATCH_ALERTS` to scratch files.
 
@@ -95,7 +102,7 @@ M=/home/you/.local/bin/mise
 D=/home/you/Projects/gog-lens
 GOG_ACCOUNT=you@example.edu
 CHAT_ME="Your Name"
-*/10 * * * * flock -n $D/logs/sync.lock $M exec -C $D -- ruby $D/gmail-sync >> $D/logs/sync.log 2>&1
+*/10 * * * * flock -n $D/logs/sync-$GOG_ACCOUNT.lock $M exec -C $D -- ruby $D/gmail-sync >> $D/logs/sync.log 2>&1
 0 8 * * 1-5  $M exec -C $D -- ruby $D/gmail-watch summary >> ~/.claude/gmail-watch.err 2>&1
 30 2 * * *   $M exec -C $D -- ruby $D/gmail-rules apply --yes >> $D/logs/rules.log 2>&1
 ```

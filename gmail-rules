@@ -18,7 +18,7 @@ end
 spec = Struct.new(:filters, :retains) do
   def filter(**kw) = filters << Gmail.rule(**kw)
   def retain(label, older_than:, action:) = retains << Retain.new(label, older_than.to_i, action)
-  def local(file) = File.exist?(p = File.join(Gmail::ROOT, file)) && instance_eval(File.read(p), p)
+  def local(*files) = (p = files.map { File.join(Gmail::ROOT, _1) }.find { File.exist?(_1) }) && instance_eval(File.read(p), p)
 end.new([], [])
 spec.instance_eval(File.read(File.join(ROOT, "rules.rb")), "rules.rb")
 
