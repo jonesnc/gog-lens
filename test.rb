@@ -61,4 +61,14 @@ class GmailTest < Minitest::Test
     p.step(25)
     assert_match %r{\Ax: 25/100 \(25%\) eta }, p.line
   end
+
+  def test_count_uses_id_only_list
+    real = Gmail.method(:list_ids)
+    Gmail.define_singleton_method(:list_ids) { |_q| %w[a b c] }
+    q = Gmail::Query.new("from:x")
+    assert_equal 3, q.count
+    assert_equal 3, q.expect(3).modify!(add: "TRASH", dry_run: true)
+  ensure
+    Gmail.define_singleton_method(:list_ids, real)
+  end
 end
