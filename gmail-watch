@@ -20,7 +20,11 @@
 require_relative "gmail"
 include Gmail
 
-STATE = ENV.fetch("GMAIL_WATCH_STATE") { File.join(Dir.home, ".claude", "gmail-watch.json") }
+STATE = ENV.fetch("GMAIL_WATCH_STATE") do
+  # One state file per account; a legacy gmail-watch.json is kept for single-account use.
+  [File.join(Dir.home, ".claude", "gmail-watch-#{ACCOUNT}.json"), File.join(Dir.home, ".claude", "gmail-watch.json")]
+    .then { |own, old| !File.exist?(own) && File.exist?(old) ? old : own }
+end
 ALERTS = ENV.fetch("GMAIL_WATCH_ALERTS") { File.join(Dir.home, ".claude", "alerts.log") }
 NAG = 900
 

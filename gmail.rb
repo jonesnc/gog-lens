@@ -19,7 +19,9 @@ module Gmail
   ROOT = __dir__
   LOGS = File.join(ROOT, "logs")
   CACHE = File.join(LOGS, "cache")
-  DB = File.join(ROOT, "index.sqlite3")
+  # One index per account; a legacy index.sqlite3 is kept for single-account use.
+  DB = [File.join(ROOT, "index-#{ACCOUNT}.sqlite3"), File.join(ROOT, "index.sqlite3")]
+       .then { |own, old| !File.exist?(own) && File.exist?(old) ? old : own }
   TTL = 600 # seconds a search result is reused
   Error = Class.new(RuntimeError)
   @@log = nil # current job log (shared by Gmail.say and included `say`)
@@ -259,7 +261,7 @@ module Gmail
 
     private
 
-    def cache_path = File.join(CACHE, "#{Digest::SHA1.hexdigest(@query)}.json")
+    def cache_path = File.join(CACHE, "#{Digest::SHA1.hexdigest("#{ACCOUNT}\n#{@query}")}.json")
 
     def fetch
       if File.exist?(cache_path) && Time.now - File.mtime(cache_path) < TTL

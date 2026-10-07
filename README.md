@@ -9,7 +9,7 @@ someone replies.
 ## Why
 
 - **Ask questions at the speed of SQL.** Gmail's per-user quota caps reads
-  at ~40-50 msg/s. One full scan builds `index.sqlite3` (headers only:
+  at ~40-50 msg/s. One full scan builds `index-<account>.sqlite3` (headers only:
   sender, subject, date, labels — no bodies); after that, `gmail-sync` pulls
   only changes through the Gmail history API in seconds.
 - **Safe bulk writes.** Every write must declare how many messages it
@@ -37,6 +37,9 @@ export CHAT_ME="Your Name"           # only for chat.rb / chat-watch
 ./gmail-sync                         # first run: full scan, resumable
 ```
 
+More than one account: set `GOG_ACCOUNT` for each run. The index, rules
+and watch state are kept per account. Old single-account files still load.
+
 ## Use
 
 ```sh
@@ -46,7 +49,7 @@ export CHAT_ME="Your Name"           # only for chat.rb / chat-watch
 ./gmr 'q("in:inbox subject:\"Out of Office\"").expect(27).trash!'
 
 # rules as code
-./gmr 'filters.map { rule_source(_1) }' > rules.local.rb   # bootstrap
+./gmr 'filters.map { rule_source(_1) }' > rules.local.$GOG_ACCOUNT.rb   # bootstrap
 ./gmail-rules plan          # diff vs live Gmail (read-only)
 ./gmail-rules apply         # dry run
 ./gmail-rules apply --yes   # write
@@ -68,7 +71,7 @@ for the full primitive list, perf notes and suggested crontab.
 | `gmail.rb` / `gmr` | primitives + one-off script runner |
 | `chat.rb` | Google Chat primitives |
 | `gmail-sync` | keeps the local index current |
-| `rules.rb` | filters + retention; loads gitignored `rules.local.rb` |
+| `rules.rb` | filters + retention; loads gitignored `rules.local.<account>.rb` |
 | `gmail-rules` | plan / apply for `rules.rb` |
 | `gmail-watch`, `chat-watch` | cron reply watchers |
 | `test.rb` | offline tests with fake data |

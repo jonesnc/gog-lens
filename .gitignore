@@ -2,3 +2,5 @@ index.sqlite3*
 logs/
 *.json
 rules.local.rb
+index-*.sqlite3*
+rules.local.*.rb
