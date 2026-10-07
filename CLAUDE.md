@@ -1,4 +1,4 @@
-# Gmail lens (gog + Ruby)
+# gog-lens (gog + Ruby)
 
 `gmail.rb` holds small **primitives** over gog's Gmail commands. Write each
 task as a short script on the fly: `./gmr '<ruby>'`. All of `Gmail` is in
@@ -92,7 +92,7 @@ Installed: `*/5` polls for `gmail-watch` and `chat-watch`, each prefixed with
 Proposed (not installed):
 ```
 M=/home/you/.local/bin/mise
-D=/home/you/Projects/gmail-lens
+D=/home/you/Projects/gog-lens
 GOG_ACCOUNT=you@example.edu
 CHAT_ME="Your Name"
 */10 * * * * flock -n $D/logs/sync.lock $M exec -C $D -- ruby $D/gmail-sync >> $D/logs/sync.log 2>&1
