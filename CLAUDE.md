@@ -87,6 +87,19 @@ does not exist. Google Chat is for Workspace only: no `chat.rb` for @gmail.com.
   one `history` call plus one metadata `get` per changed message.
 - To profile: `mise exec -- vernier run -- ./gmr '...'`, then `vernier view`.
 
+## gmail-sync
+
+- First run: full scan in 50-row pages. After each page it saves the rows and
+  the next page token (`meta full_page`). Stop it at any time; a rerun resumes
+  at the saved page ("resuming at saved page"), losing at most one page.
+- The history id is saved at the start, so the first incremental run after
+  `full_done` catches changes made during the scan.
+- Gmail page tokens can expire after a long pause (days). If a resume fails,
+  `./gmail-sync --full` starts over.
+- Later runs: incremental via the history API (seconds).
+- Lid closed = Mac sleeps = sync pauses; it continues after wake.
+- Each account has its own quota bucket, so two accounts can sync at once.
+
 ## gmail-watch
 
 ```
