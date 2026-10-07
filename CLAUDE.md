@@ -80,8 +80,9 @@ does not exist. Google Chat is for Workspace only: no `chat.rb` for @gmail.com.
   under the per-user limit. Default 1400 units/min (measured limit ~1500 on a
   new project); set `GOG_LENS_UNITS_PER_MIN` after a quota increase.
 - Going over quota anyway starts a cooldown: retries wait 2-32 s, then raise.
-- Live reads upsert rows into the index, and writes update its labels, once
-  the index file exists.
+- The index follows every live read and write once its file exists: `q` rows
+  and `thread` are upserted, `modify!` updates labels, and TRASH/SPAM rows are
+  removed (the index holds live mail only, like `gmail-sync`).
 - Full index scan of ~250k msgs ≈ 1.5 h (one time). Incremental sync costs
   one `history` call plus one metadata `get` per changed message.
 - To profile: `mise exec -- vernier run -- ./gmr '...'`, then `vernier view`.

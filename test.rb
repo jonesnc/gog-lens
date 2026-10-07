@@ -78,4 +78,19 @@ class GmailTest < Minitest::Test
     assert_equal 50, Gmail.cost("gmail", %w[batch modify a b])
     assert_equal 5, Gmail.cost("api", %w[call gmail v1 users.messages.list])
   end
+
+  def test_index_follows_reads_and_trash
+    Gmail.idx # creates the test index file
+    m = ->(id, labels) { Gmail::Msg.new(id, "t", "a@b.c", "s", "2026-01-01 00:00", labels) }
+    Gmail.index_msgs([m.("1", %w[INBOX]), m.("2", %w[INBOX]), m.("3", %w[TRASH])])
+    assert_equal %w[1 2], Gmail.idx("SELECT id FROM msgs ORDER BY id").map { _1["id"] }
+    Gmail.index_labels(%w[1], remove: "INBOX", add: "Shop")
+    assert_equal "|Shop|", Gmail.idx("SELECT labels FROM msgs WHERE id='1'").first["labels"]
+    Gmail.index_labels(%w[2], add: "TRASH")
+    assert_equal %w[1], Gmail.idx("SELECT id FROM msgs").map { _1["id"] }
+  ensure
+    Gmail.idx.close
+    Gmail.instance_variable_set(:@db, nil)
+    Dir["#{Gmail::DB}*"].each { File.delete(_1) }
+  end
 end
