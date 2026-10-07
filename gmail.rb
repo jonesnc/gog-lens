@@ -14,7 +14,11 @@ require "open3"
 require "time"
 
 module Gmail
-  ACCOUNT = ENV.fetch("GOG_ACCOUNT") { abort "set GOG_ACCOUNT=<your gmail address>" }
+  # GOG_ACCOUNT, else the only account in `gog auth list`.
+  ACCOUNT = ENV.fetch("GOG_ACCOUNT") do
+    accounts = Open3.capture2("gog", "auth", "list").first.lines.map { _1.split("\t").first }.uniq
+    accounts.one? ? accounts.first : abort("set GOG_ACCOUNT=<your gmail address> (gog has #{accounts.size} accounts)")
+  end
   ORG = ACCOUNT.split("@").last # own domain: masked harder
   ROOT = __dir__
   LOGS = File.join(ROOT, "logs")

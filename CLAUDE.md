@@ -43,7 +43,8 @@ mask(addr)  redact(subjects)
 
 ## Setup
 
-Env only, no defaults: `GOG_ACCOUNT` (gmail address) for everything,
+Env: `GOG_ACCOUNT` (gmail address) for everything; with one gog account it
+defaults to that account,
 `CHAT_ME` (your Chat display name) for `chat.rb`. Scripts abort if unset.
 
 More than one account: each one has its own index (`index-<account>.sqlite3`),

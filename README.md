@@ -31,7 +31,7 @@ someone replies.
 
 ```sh
 git clone https://github.com/jonesnc/gog-lens && cd gog-lens
-export GOG_ACCOUNT=you@example.com   # required, no default
+export GOG_ACCOUNT=you@example.com   # optional with one gog account
 export CHAT_ME="Your Name"           # only for chat.rb / chat-watch
 ./test.rb                            # offline tests
 ./gmail-sync                         # first run: full scan, resumable
