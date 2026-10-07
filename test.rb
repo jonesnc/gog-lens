@@ -4,7 +4,6 @@
 # Offline tests with fake data: ./test.rb (no Gmail calls).
 
 require "minitest/autorun"
-require "minitest/mock"
 ENV["GOG_ACCOUNT"] = "me@example.edu"
 require_relative "gmail"
 
@@ -64,10 +63,12 @@ class GmailTest < Minitest::Test
   end
 
   def test_count_uses_id_only_list
-    Gmail.stub(:list_ids, %w[a b c]) do
-      q = Gmail::Query.new("from:x")
-      assert_equal 3, q.count
-      assert_equal 3, q.expect(3).modify!(add: "TRASH", dry_run: true)
-    end
+    real = Gmail.method(:list_ids)
+    Gmail.define_singleton_method(:list_ids) { |_q| %w[a b c] }
+    q = Gmail::Query.new("from:x")
+    assert_equal 3, q.count
+    assert_equal 3, q.expect(3).modify!(add: "TRASH", dry_run: true)
+  ensure
+    Gmail.define_singleton_method(:list_ids, real)
   end
 end
