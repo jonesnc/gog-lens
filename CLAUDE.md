@@ -93,8 +93,11 @@ Test without alerting the Mac: set `GMAIL_WATCH_STATE` and
 
 ## Cron
 
-Installed: `*/5` polls for `gmail-watch` and `chat-watch`, each prefixed with
-`GOG_ACCOUNT=... CHAT_ME="..."` (see `crontab -l`).
+Installed (see `crontab -l`), all through `~/.local/bin/gog-lens-cron`, which
+loads `~/.config/gog-lens/env`:
+- `gmail-watch`: every 30 s. Two `* * * * *` entries, the second with
+  `sleep 30;`, both wrapped in `flock -n /tmp/gmail-watch.lock`.
+- `chat-watch`: not installed.
 
 Proposed (not installed):
 ```
