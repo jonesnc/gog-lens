@@ -1,4 +1,4 @@
-#!/usr/bin/env -S mise exec -- ruby
+#!/usr/bin/env -S mise exec ruby@4 -- ruby
 # frozen_string_literal: true
 
 # Keep index.sqlite3 current. First run: full scan (resumable, ~51 msg/s).

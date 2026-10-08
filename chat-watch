@@ -1,4 +1,4 @@
-#!/usr/bin/env -S mise exec -- ruby
+#!/usr/bin/env -S mise exec ruby@4 -- ruby
 # frozen_string_literal: true
 
 # Alert + nag on a Google Chat space, same pattern as gmail-watch.
