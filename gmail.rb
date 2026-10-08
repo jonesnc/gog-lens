@@ -400,10 +400,40 @@ module Gmail
           CREATE INDEX IF NOT EXISTS msgs_ts ON msgs(ts);
           CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
         SQL
+        db.execute_batch(FTS_SQL) if db.execute("SELECT 1 FROM sqlite_master WHERE name='fts'").empty?
       end
     end
     sql ? @db.execute(sql, args) : @db
   end
+
+  # Full-text index over sender, name and subject (FTS5, kept in step with msgs
+  # by triggers, so every writer updates it). Built once from msgs on first open.
+  FTS_SQL = <<~SQL
+    CREATE VIRTUAL TABLE fts USING fts5(sender, from_raw, subject, content=msgs,
+      content_rowid=rowid, tokenize="unicode61 remove_diacritics 2");
+    INSERT INTO fts(rowid, sender, from_raw, subject) SELECT rowid, sender, from_raw, subject FROM msgs;
+    CREATE TRIGGER msgs_ai AFTER INSERT ON msgs BEGIN
+      INSERT INTO fts(rowid, sender, from_raw, subject) VALUES (new.rowid, new.sender, new.from_raw, new.subject);
+    END;
+    CREATE TRIGGER msgs_ad AFTER DELETE ON msgs BEGIN
+      INSERT INTO fts(fts, rowid, sender, from_raw, subject) VALUES ('delete', old.rowid, old.sender, old.from_raw, old.subject);
+    END;
+    CREATE TRIGGER msgs_au AFTER UPDATE ON msgs BEGIN
+      INSERT INTO fts(fts, rowid, sender, from_raw, subject) VALUES ('delete', old.rowid, old.sender, old.from_raw, old.subject);
+      INSERT INTO fts(rowid, sender, from_raw, subject) VALUES (new.rowid, new.sender, new.from_raw, new.subject);
+    END;
+  SQL
+
+  # Full-text search, ranked; FTS5 syntax (prefix*, "phrase", OR, NOT, col:term).
+  #   fts("receipt OR invoice", where: has_label("INBOX"), limit: 50)  # => [Msg]
+  #   fts("subject:(order NOT \"order today\")")
+  def fts(match, where: "1", limit: 200)
+    idx("SELECT msgs.* FROM fts JOIN msgs ON msgs.rowid = fts.rowid WHERE fts MATCH ? AND #{where} " \
+        "ORDER BY rank LIMIT #{limit.to_i}", match).map { row_msg(_1) }
+  end
+
+  # Rebuild FTS from msgs (after a writer without the triggers, or to repair).
+  def fts_rebuild! = idx("INSERT INTO fts(fts) VALUES('rebuild')")
 
   def meta(k) = idx("SELECT v FROM meta WHERE k=?", k).first&.fetch("v")
   def meta!(k, v) = idx("INSERT OR REPLACE INTO meta VALUES(?,?)", k, v.to_s)
@@ -412,8 +442,10 @@ module Gmail
     idx.transaction do
       msgs.each do |m|
         ts = Time.parse(m.date).to_i rescue 0
-        idx("INSERT OR REPLACE INTO msgs VALUES(?,?,?,?,?,?,?)", m.id, m.thread_id,
-            m.sender, m.from, m.subject, ts, "|#{m.labels.join('|')}|")
+        # A real UPSERT, not OR REPLACE: REPLACE skips the delete trigger and leaves stale FTS rows.
+        idx("INSERT INTO msgs VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET thread_id=excluded.thread_id, " \
+            "sender=excluded.sender, from_raw=excluded.from_raw, subject=excluded.subject, ts=excluded.ts, " \
+            "labels=excluded.labels", m.id, m.thread_id, m.sender, m.from, m.subject, ts, "|#{m.labels.join('|')}|")
       end
     end
   end
@@ -458,10 +490,12 @@ module Gmail
   #   ix("sender LIKE ?", "%@vendor.com", limit: 50)  # => [Msg], newest first
   def ix(where = "1", *args, limit: nil)
     sql = "SELECT * FROM msgs WHERE #{where} ORDER BY ts DESC#{" LIMIT #{limit.to_i}" if limit}"
-    idx(sql, *args).map do |r|
-      Msg.new(r["id"], r["thread_id"], r["from_raw"], r["subject"],
-              Time.at(r["ts"]).strftime("%Y-%m-%d %H:%M"), r["labels"].split("|").reject(&:empty?))
-    end
+    idx(sql, *args).map { row_msg(_1) }
+  end
+
+  def row_msg(r)
+    Msg.new(r["id"], r["thread_id"], r["from_raw"], r["subject"],
+            Time.at(r["ts"]).strftime("%Y-%m-%d %H:%M"), r["labels"].split("|").reject(&:empty?))
   end
 
   # Newest history id in the mailbox (start point for incremental sync).

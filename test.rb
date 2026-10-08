@@ -88,6 +88,12 @@ class GmailTest < Minitest::Test
     assert_equal "|Shop|", Gmail.idx("SELECT labels FROM msgs WHERE id='1'").first["labels"]
     Gmail.index_labels(%w[2], add: "TRASH")
     assert_equal %w[1], Gmail.idx("SELECT id FROM msgs").map { _1["id"] }
+    Gmail.index_msgs([m.("4", %w[INBOX]).with(subject: "Your order receipt")])
+    assert_equal %w[4], Gmail.fts("receipt").map(&:id)
+    Gmail.index_msgs([m.("4", %w[INBOX]).with(subject: "Your order receipt again")])
+    assert_equal 1, Gmail.idx("SELECT COUNT(*) n FROM fts WHERE fts MATCH 'receipt'").first["n"]
+    Gmail.index_labels(%w[4], add: "TRASH")
+    assert_empty Gmail.fts("receipt")
   ensure
     Gmail.idx.close
     Gmail.instance_variable_set(:@db, nil)

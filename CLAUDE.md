@@ -21,6 +21,8 @@ need it. Never add task-specific features.
 ix("sender LIKE ?", "%@vendor.com", limit: 20)   # => [Msg], newest first
 idx("SELECT sender, COUNT(*) n FROM msgs WHERE #{has_label('Dev/Sentry')} GROUP BY 1")
 meta("synced")                                   # last incremental sync time
+fts("receipt OR invoice", where: has_label("INBOX"), limit: 50)  # FTS5 over sender/name/subject, ranked
+fts_rebuild!                                     # repair FTS after an old writer
 
 # live API
 q("gmail query")            # lazy, cached 10 min, Enumerable of Msg
