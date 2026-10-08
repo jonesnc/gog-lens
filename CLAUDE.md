@@ -32,7 +32,7 @@ q("gmail query")            # lazy, cached 10 min, Enumerable of Msg
   .modify!(add:, remove:, dry_run: true)
 q(...).summary              # "N threads / M msgs, ..." (always both units)
 q(...).top(:sender|:day|:domain, n) .ids .thread_ids .fresh
-thread(id) thread_id(url|id)
+thread(id) thread_id(url|id)   # a pasted 16-hex id is from the README bookmarklet
 Msg: id thread_id from name subject date labels sender domain masked
      unread? inbox? mine? day url headers("To","Cc",...) body!
 labels  label_list  label_names  label_id(n)  ensure_label(n)  delete_label!(n)
