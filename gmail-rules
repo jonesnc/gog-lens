@@ -1,4 +1,4 @@
-#!/usr/bin/env -S mise exec -- ruby
+#!/usr/bin/env -S mise exec ruby@4 -- ruby
 # frozen_string_literal: true
 
 # Make Gmail match rules.rb (filters + retention). See rules.rb header.

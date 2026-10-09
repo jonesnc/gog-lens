@@ -1,4 +1,4 @@
-#!/usr/bin/env -S mise exec -- ruby
+#!/usr/bin/env -S mise exec ruby@4 -- ruby
 # frozen_string_literal: true
 
 # Alert the user's Mac about Gmail. Same pattern as ~/.local/bin/pr-alert-watch.py:

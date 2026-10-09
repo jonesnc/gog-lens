@@ -64,6 +64,21 @@ Watchers write to `~/.claude/alerts.log`; point anything at that file
 (a `tail -F` over ssh into a desktop notifier works well). See `CLAUDE.md`
 for the full primitive list, perf notes and suggested crontab.
 
+## Thread ID from the browser
+
+Gmail web URLs (`#inbox/QgrcJ...`) do not hold the API thread ID. Links
+for mail you send and receive in the same account decode to
+`thread-a:r-<n>`, which no public API maps. The page itself has the real
+ID in `data-legacy-thread-id`. Save this as a bookmark URL, open an
+email, click it: the 16-hex thread ID goes to the clipboard and a small
+toast shows it.
+
+```
+javascript:(()=>{const toast=m=>{const d=document.createElement('div');d.textContent=m;d.style.cssText='position:fixed;bottom:24px;right:24px;z-index:99999;background:#202124;color:#fff;padding:8px 14px;border-radius:8px;font:13px system-ui;box-shadow:0 2px 8px #0004;transition:opacity .3s';document.body.appendChild(d);setTimeout(()=>{d.style.opacity=0;setTimeout(()=>d.remove(),300)},1500)};const e=document.querySelector('[role="main"] [data-legacy-thread-id]');if(!e)return toast('No open thread');const t=e.getAttribute('data-legacy-thread-id');navigator.clipboard.writeText(t).then(()=>toast('Copied '+t),()=>toast('Copy failed'))})()
+```
+
+Then `./gmr 'thread("<id>")'` or `./gmail-watch add <id> "Label"`.
+
 ## Files
 
 | File | Job |
