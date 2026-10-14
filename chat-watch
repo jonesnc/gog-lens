@@ -3,9 +3,12 @@
 
 # Alert + nag on a Google Chat space, same pattern as gmail-watch.
 # When the newest message is from someone else: alert, then re-alert every
-# 15 min (not 18:00-07:30) until I post in the space.
+# 15 min (not 18:00-07:30) until I post in the space or read it there.
 #
 #   chat-watch add <space|url> <name...>   watch
+#   chat-watch add-from <name> -- <sender regex>
+#                                           alert once per new message from a
+#                                           matching sender in any DM or group
 #   chat-watch rm <name|space>              stop watching
 #   chat-watch list                         show watches
 #   chat-watch                              poll (cron)
@@ -18,6 +21,13 @@ NAG = 900
 
 state = File.exist?(STATE) ? JSON.parse(File.read(STATE)) : {}
 save = -> { File.write(STATE, JSON.pretty_generate(state)) }
+# Recent messages from matching senders across DMs and group chats.
+from_msgs = lambda do |from|
+  re = Regexp.new(from, Regexp::IGNORECASE)
+  Chat.spaces.select { %w[DIRECT_MESSAGE GROUP_CHAT].include?(_1["type"]) }
+      .flat_map { |sp| Chat.messages(sp["resource"], max: 5) rescue [] }  # one bad space must not stop the poll
+      .select { re.match?(_1.sender) && _1.time > Time.now - 2 * 86_400 }
+end
 quiet = -> { t = Time.now.strftime("%H:%M"); t >= "18:00" || t < "07:30" }
 
 case ARGV.shift
@@ -27,6 +37,13 @@ when "add"
   state[space] = { "name" => ARGV.join(" "), "seen" => last&.id, "alerted" => 0 }
   save.call
   puts "watching #{state[space]['name']} (#{space})"
+when "add-from"
+  name = ARGV.take_while { _1 != "--" }.join(" ")
+  from = ARGV.drop_while { _1 != "--" }.drop(1).join(" ")
+  abort "usage: chat-watch add-from <name> -- <sender regex>" if name.empty? || from.empty?
+  state["from:#{name}"] = { "name" => name, "from" => from, "seen" => from_msgs.(from).map(&:id) }
+  save.call
+  puts "watching #{name}: senders matching /#{from}/i"
 when "rm"
   key = ARGV.join(" ")
   state.reject! { |s, w| s == key || w["name"] == key }
@@ -35,12 +52,20 @@ when "list"
   state.each { |s, w| puts "#{w['name']}  #{s}" }
 else
   state.each do |space, w|
+    if w["from"]
+      fresh = from_msgs.(w["from"]).reject { w["seen"].include?(_1.id) }
+      fresh.each { File.write(ALERTS, "Chat #{w['name']}: new message from #{_1.sender}.\n", mode: "a") }
+      w["seen"] = (w["seen"] + fresh.map(&:id)).last(200)
+      next
+    end
     last = Chat.messages(space, max: 1).first or next
     next w["alerted"] = 0 if last.mine?
 
     fresh = last.id != w["seen"]
     due = Time.now.to_i - w["alerted"].to_i >= NAG && !quiet.call
     next unless fresh || due
+    # Read in Chat (e.g. reacted to) = handled; gog does not expose reactions.
+    next if !fresh && Chat.gog("messages", "list", space, "--max", 1, "--unread")["messages"].to_a.empty?
 
     verb = fresh ? "new message from" : "still waiting on you:"
     File.write(ALERTS, "Chat #{w['name']}: #{verb} #{last.sender}.\n", mode: "a")

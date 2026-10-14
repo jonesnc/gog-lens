@@ -108,6 +108,8 @@ does not exist. Google Chat is for Workspace only: no `chat.rb` for @gmail.com.
 ./gmail-watch add <gmail-url|thread-id> <name> [--nag]
 ./gmail-watch add-query <name> -- '<gmail query>' [--nag]
 ./gmail-watch rm <name> | snooze <name> <min> | list | summary
+./chat-watch add <space|url> <name>
+./chat-watch add-from <name> -- '<sender regex>'   # any DM/group, one alert per message
 ```
 Poll (no args) appends `Gmail thread <name>: email from <sender name>
 waiting for you.` to `~/.claude/alerts.log`. `--nag` repeats every 15 min
@@ -122,7 +124,8 @@ Installed (see `crontab -l`), all through `~/.local/bin/gog-lens-cron`, which
 loads `~/.config/gog-lens/env`:
 - `gmail-watch`: every 30 s. Two `* * * * *` entries, the second with
   `sleep 30;`, both wrapped in `flock -n /tmp/gmail-watch.lock`.
-- `chat-watch`: not installed.
+- `chat-watch`: every 2 min (`*/2`), `flock -n /tmp/chat-watch.lock`; a
+  poll scans all DM and group spaces (~20 s) for `add-from` watches.
 
 Proposed (not installed):
 ```
